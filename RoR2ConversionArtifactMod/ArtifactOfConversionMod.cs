@@ -124,7 +124,7 @@ namespace RoR2ConversionArtifactMod
 
                 foreach (Type type in Assembly.GetExecutingAssembly().GetTypes())
                 {
-                    if (type.IsSubclassOf(typeof(Chat.ChatMessageBase)))
+                    if (type.IsSubclassOf(typeof(Chat.ChatMessageBase)) && !chatMessageTypeToIndex.ContainsKey(type) && !chatMessageIndexToType.Contains(type))
                     {
                         chatMessageTypeToIndex.Add(type, (byte)chatMessageIndexToType.Count);
                         chatMessageIndexToType.Add(type);
@@ -217,7 +217,10 @@ namespace RoR2ConversionArtifactMod
         private void Run_OnUserAdded(On.RoR2.Run.orig_OnUserAdded orig, Run self, NetworkUser user)
         {
             orig(self, user);
-            players.Add(user.connectionToClient, user.master);
+            if (players.ContainsKey(user.connectionToClient))
+            {
+                players.Add(user.connectionToClient, user.master);
+            }
         }
 
         private void GenericPickupController_OnTriggerStay(On.RoR2.GenericPickupController.orig_OnTriggerStay orig, RoR2.GenericPickupController self, Collider other)
