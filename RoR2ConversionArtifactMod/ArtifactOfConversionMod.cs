@@ -217,7 +217,7 @@ namespace RoR2ConversionArtifactMod
         private void Run_OnUserAdded(On.RoR2.Run.orig_OnUserAdded orig, Run self, NetworkUser user)
         {
             orig(self, user);
-            if (players.ContainsKey(user.connectionToClient))
+            if (!players.ContainsKey(user.connectionToClient))
             {
                 players.Add(user.connectionToClient, user.master);
             }
