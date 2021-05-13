@@ -6,6 +6,7 @@ using System.Threading.Tasks;
 using BepInEx;
 using RoR2;
 using RoR2.UI;
+using RoR2.Achievements;
 using R2API;
 using UnityEngine;
 using UnityEngine.EventSystems;
@@ -15,6 +16,7 @@ using UnityEngine.Networking.PlayerConnection;
 using UnityEngine.UI;
 using R2API.Utils;
 using System.Reflection;
+using System.IO;
 
 namespace RoR2ConversionArtifactMod
 {
@@ -24,14 +26,34 @@ namespace RoR2ConversionArtifactMod
     {
         public const string modGuid = "ConversionArtifactMod";
         public const string modName = "Artifact of Conversion mod";
-        public const string modVersion = "0.0.1";
+        public const string modVersion = "1.0.0";
         
         ArtifactDef Conversion;
 
-        Dictionary<NetworkConnection, CharacterMaster> players;
-        static short msgItemDropType = 321;
-        static short msgEquipmentDropType = 322;
-        static short msgDropCallbackType = 320;
+        static Dictionary<NetworkConnection, CharacterMaster> players;
+        public static readonly short msgItemDropType = (short)(MsgType.Highest + modGuid.GetHashCode() + 3);
+        public static readonly short msgEquipmentDropType = (short)(MsgType.Highest + modGuid.GetHashCode() + 2);
+        public static readonly short msgDropCallbackType = (short)(MsgType.Highest + modGuid.GetHashCode() +1);
+
+        static readonly NetworkMessageDelegate msgItemDropHandler = (NetworkMessage msg) =>
+        {
+            var itemIndex = msg.reader.ReadItemIndex();
+            ServerStuffDropper.DropItem(players[msg.conn], itemIndex);
+            var limits = players[msg.conn].GetComponent<InventoryLimits>();
+            limits.Count(players[msg.conn].inventory);
+            //msg.conn.Send(msgDropCallbackType, new DropCallbackMessage());
+        };
+
+        static readonly NetworkMessageDelegate msgEquipmentDropHandler = (NetworkMessage msg) =>
+        {
+            var equipmentIndex = msg.reader.ReadEquipmentIndex();
+            ServerStuffDropper.DropEquipment(players[msg.conn], equipmentIndex);
+        };
+
+        static readonly NetworkMessageDelegate msgDropCallbackHandler = (NetworkMessage msg) =>
+        {
+            ConversionArtifactMod.master.GetComponent<InventoryLimits>().Count(ConversionArtifactMod.master.inventory);
+        };
 
         static CharacterMaster master;
         
@@ -40,8 +62,19 @@ namespace RoR2ConversionArtifactMod
             Conversion = ScriptableObject.CreateInstance<ArtifactDef>();
             Conversion.nameToken = "Artifact of Conversion";
             Conversion.descriptionToken = "Amount of your items is capped with your experience level, BUT you can DROP your items. Gain experience and share with friends! Click on an item to drop.";
-            Conversion.smallIconDeselectedSprite = LoadoutAPI.CreateSkinIcon(Color.white, Color.white, Color.white, Color.white);
-            Conversion.smallIconSelectedSprite = LoadoutAPI.CreateSkinIcon(Color.gray, Color.white, Color.white, Color.white);
+            Sprite template = LoadoutAPI.CreateSkinIcon(Color.white, Color.white, Color.white, Color.white);
+            string artifactIconPath = $"file:\\\\{Info.Location}\\..\\conv.png";
+            string artifactIconDisabledPath = $"file:\\\\{Info.Location}\\..\\convdis.png";
+            WWW w = new WWW(artifactIconPath);
+            while (!w.isDone) ;
+            WWW ww = new WWW(artifactIconDisabledPath);
+            while (!ww.isDone) ;
+            Texture2D artifactIconTexture = w.texture;
+            Texture2D artifactIconDisabledTexture = ww.texture;
+            Sprite artifactIcon = Sprite.Create(artifactIconTexture, template.rect, template.pivot);
+            Sprite artifactDisabledIcon = Sprite.Create(artifactIconDisabledTexture, template.rect, template.pivot);
+            Conversion.smallIconDeselectedSprite = artifactDisabledIcon;
+            Conversion.smallIconSelectedSprite = artifactIcon;
 
             ArtifactCatalog.getAdditionalEntries += (list) =>
             {
@@ -63,15 +96,23 @@ namespace RoR2ConversionArtifactMod
 
                 On.RoR2.Run.Start -= Run_Start;
 
-                On.RoR2.PlayerCharacterMasterController.Start -= PlayerCharacterMasterController_Start;
+                On.RoR2.PlayerCharacterMasterController.OnBodyStart += PlayerCharacterMasterController_OnBodyStart;
 
-                On.RoR2.CharacterBody.OnLevelChanged -= CharacterBody_OnLevelChanged;
+                On.RoR2.CharacterBody.OnLevelUp -= CharacterBody_OnLevelUp;
 
                 On.RoR2.CharacterMaster.OnInventoryChanged -= CharacterMaster_OnInventoryChanged;
 
                 On.RoR2.Run.OnUserAdded -= Run_OnUserAdded;
 
                 On.RoR2.Run.OnUserRemoved -= Run_OnUserRemoved;
+
+                players.Clear();
+
+                if (NetworkServer.active)
+                {
+                    NetworkServer.UnregisterHandler(msgItemDropType);
+                    NetworkServer.UnregisterHandler(msgEquipmentDropType);
+                }
             }
         }
 
@@ -85,9 +126,9 @@ namespace RoR2ConversionArtifactMod
 
                 On.RoR2.Run.Start += Run_Start;
 
-                On.RoR2.PlayerCharacterMasterController.Start += PlayerCharacterMasterController_Start;
+                On.RoR2.PlayerCharacterMasterController.OnBodyStart += PlayerCharacterMasterController_OnBodyStart;
 
-                On.RoR2.CharacterBody.OnLevelChanged += CharacterBody_OnLevelChanged;
+                On.RoR2.CharacterBody.OnLevelUp += CharacterBody_OnLevelUp;
 
                 On.RoR2.CharacterMaster.OnInventoryChanged += CharacterMaster_OnInventoryChanged;
 
@@ -95,36 +136,23 @@ namespace RoR2ConversionArtifactMod
 
                 On.RoR2.Run.OnUserRemoved += Run_OnUserRemoved;
 
+                if (players == null)
+                    players = new Dictionary<NetworkConnection, CharacterMaster>();
+
                 if (NetworkServer.active)
                 {
-                    if (players == null)
-                        players = new Dictionary<NetworkConnection, CharacterMaster>();
-                    NetworkMessageDelegate msgItemDropHandler = (NetworkMessage msg) =>
-                    {
-                        var itemIndex = msg.reader.ReadItemIndex();
-                        ServerStuffDropper.DropItem(players[msg.conn], itemIndex);
-                        var limits = players[msg.conn].GetComponent<InventoryLimits>();
-                        limits.Count(players[msg.conn].inventory);
-                        msg.conn.Send(msgDropCallbackType, new DropCallbackMessage());
-                    };
                     NetworkServer.RegisterHandler(msgItemDropType, msgItemDropHandler);
-
-                    NetworkMessageDelegate msgEquipmentDropHandler = (NetworkMessage msg) =>
-                    {
-                        var equipmentIndex = msg.reader.ReadEquipmentIndex();
-                        ServerStuffDropper.DropEquipment(players[msg.conn], equipmentIndex);
-                    };
                     NetworkServer.RegisterHandler(msgEquipmentDropType, msgEquipmentDropHandler);
                 }
 
-                FieldInfo chatMessageTypeToIndexField = typeof(Chat.ChatMessageBase).GetField("chatMessageTypeToIndex", BindingFlags.NonPublic | BindingFlags.Static);
+                FieldInfo chatMessageTypeToIndexField = typeof(ChatMessageBase).GetField("chatMessageTypeToIndex", BindingFlags.NonPublic | BindingFlags.Static);
                 Dictionary<Type, byte> chatMessageTypeToIndex = (Dictionary<Type, byte>)chatMessageTypeToIndexField.GetValue(null);
-                FieldInfo chatMessageIndexToTypeField = typeof(Chat.ChatMessageBase).GetField("chatMessageIndexToType", BindingFlags.NonPublic | BindingFlags.Static);
+                FieldInfo chatMessageIndexToTypeField = typeof(ChatMessageBase).GetField("chatMessageIndexToType", BindingFlags.NonPublic | BindingFlags.Static);
                 List<Type> chatMessageIndexToType = (List<Type>)chatMessageIndexToTypeField.GetValue(null);
 
                 foreach (Type type in Assembly.GetExecutingAssembly().GetTypes())
                 {
-                    if (type.IsSubclassOf(typeof(Chat.ChatMessageBase)) && !chatMessageTypeToIndex.ContainsKey(type) && !chatMessageIndexToType.Contains(type))
+                    if (type.IsSubclassOf(typeof(ChatMessageBase)) && !chatMessageTypeToIndex.ContainsKey(type) && !chatMessageIndexToType.Contains(type))
                     {
                         chatMessageTypeToIndex.Add(type, (byte)chatMessageIndexToType.Count);
                         chatMessageIndexToType.Add(type);
@@ -135,22 +163,21 @@ namespace RoR2ConversionArtifactMod
             }
         }
 
-        private void PlayerCharacterMasterController_Start(On.RoR2.PlayerCharacterMasterController.orig_Start orig, PlayerCharacterMasterController self)
+        private void PlayerCharacterMasterController_OnBodyStart(On.RoR2.PlayerCharacterMasterController.orig_OnBodyStart orig, PlayerCharacterMasterController self)
         {
             if (NetworkClient.active)
             {
                 ConversionArtifactMod.master = self.master;
-                NetworkMessageDelegate msgDropCallbackHandler = (NetworkMessage msg) =>
-                {
-                    ConversionArtifactMod.master.GetComponent<InventoryLimits>().Count(ConversionArtifactMod.master.inventory);
-                };
-                ClientScene.readyConnection.RegisterHandler(msgDropCallbackType, msgDropCallbackHandler);
+                //self.networkUser.connectionToServer.RegisterHandler(msgDropCallbackType, msgDropCallbackHandler);
+                //self.connectionToServer.RegisterHandler(msgDropCallbackType, msgDropCallbackHandler);
+                //ClientScene.readyConnection.RegisterHandler(msgDropCallbackType, msgDropCallbackHandler);
             }
             var master = self.master;
             if (master != null && master.GetComponent<InventoryLimits>() == null && master.GetComponent<DropperApplier>() == null)
             {
                 InventoryLimits limits = master.gameObject.AddComponent<InventoryLimits>();
                 limits.limit = (int)TeamManager.instance.GetTeamLevel(self.master.teamIndex);
+                limits.Count(master.inventory);
                 DropperApplier dropperApplier = master.gameObject.AddComponent<DropperApplier>();
                 dropperApplier.inventory = master.inventory;
                 dropperApplier.master = master;
@@ -171,38 +198,24 @@ namespace RoR2ConversionArtifactMod
             orig(self);
         }
 
-        private void CharacterBody_OnLevelChanged(On.RoR2.CharacterBody.orig_OnLevelChanged orig, CharacterBody self)
+        private void CharacterBody_OnLevelUp(On.RoR2.CharacterBody.orig_OnLevelUp orig, CharacterBody self)
         {
             orig(self);
             if (self.master != null)
             {
                 var limits = self.master.GetComponent<InventoryLimits>();
                 if (limits != null)
-                    limits.limit = (int)(TeamManager.instance.GetTeamLevel(self.master.teamIndex) + 1);
+                    limits.limit = (int)(TeamManager.instance.GetTeamLevel(self.master.teamIndex));
             }
         }
 
         private void Run_Start(On.RoR2.Run.orig_Start orig, Run self)
         {
+            if (players == null)
+                players = new Dictionary<NetworkConnection, CharacterMaster>();
             if (NetworkServer.active)
             {
-                if (players == null)
-                    players = new Dictionary<NetworkConnection, CharacterMaster>();
-                NetworkMessageDelegate msgItemDropHandler = (NetworkMessage msg) =>
-                {
-                    var itemIndex = msg.reader.ReadItemIndex();
-                    ServerStuffDropper.DropItem(players[msg.conn], itemIndex);
-                    var limits = players[msg.conn].GetComponent<InventoryLimits>();
-                    limits.Count(players[msg.conn].inventory);
-                    msg.conn.Send(msgDropCallbackType, new DropCallbackMessage());
-                };
                 NetworkServer.RegisterHandler(msgItemDropType, msgItemDropHandler);
-
-                NetworkMessageDelegate msgEquipmentDropHandler = (NetworkMessage msg) =>
-                {
-                    var equipmentIndex = msg.reader.ReadEquipmentIndex();
-                    ServerStuffDropper.DropEquipment(players[msg.conn], equipmentIndex);
-                };
                 NetworkServer.RegisterHandler(msgEquipmentDropType, msgEquipmentDropHandler);
             }
             orig(self);
@@ -217,14 +230,16 @@ namespace RoR2ConversionArtifactMod
         private void Run_OnUserAdded(On.RoR2.Run.orig_OnUserAdded orig, Run self, NetworkUser user)
         {
             orig(self, user);
-            if (!players.ContainsKey(user.connectionToClient))
+            if (user.connectionToClient != null && !players.ContainsKey(user.connectionToClient))
             {
                 players.Add(user.connectionToClient, user.master);
             }
         }
 
         private void GenericPickupController_OnTriggerStay(On.RoR2.GenericPickupController.orig_OnTriggerStay orig, RoR2.GenericPickupController self, Collider other)
-        { }
+        {
+            
+        }
 
         private void GenericPickupController_AttemptGrant(On.RoR2.GenericPickupController.orig_AttemptGrant orig, RoR2.GenericPickupController self, RoR2.CharacterBody body)
         {
@@ -253,6 +268,26 @@ namespace RoR2ConversionArtifactMod
                     DropperChat.ItemCountMessage(body.GetUserName(), limits.amount, limits.limit);
                 }
             }
+        }
+    }
+
+    public class ArtifactDesignProvider : IResourceProvider
+    {
+        public string ModPrefix => throw new NotImplementedException();
+
+        public UnityEngine.Object Load(string path, Type type)
+        {
+            throw new NotImplementedException();
+        }
+
+        public UnityEngine.Object[] LoadAll(Type type)
+        {
+            throw new NotImplementedException();
+        }
+
+        public ResourceRequest LoadAsync(string path, Type type)
+        {
+            throw new NotImplementedException();
         }
     }
 
@@ -335,7 +370,7 @@ namespace RoR2ConversionArtifactMod
                     {
                         Debug.LogError("Connection is not ready.");
                     }
-                    ClientScene.readyConnection.Send(321, new ItemDropMessage(itemIndex));
+                    ClientScene.readyConnection.Send(ConversionArtifactMod.msgItemDropType, new ItemDropMessage(itemIndex));
                 }
             }
         }
@@ -375,7 +410,7 @@ namespace RoR2ConversionArtifactMod
                     {
                         Debug.LogError("Connection is not ready.");
                     }
-                    ClientScene.readyConnection.Send(322, new EquipmentDropMessage(equipmentIndex));
+                    ClientScene.readyConnection.Send(ConversionArtifactMod.msgEquipmentDropType, new EquipmentDropMessage(equipmentIndex));
                 }
             }
         }
@@ -418,7 +453,7 @@ namespace RoR2ConversionArtifactMod
         }
     }
 
-    public class PlayerItemsCountChatMessage : Chat.ChatMessageBase
+    public class PlayerItemsCountChatMessage : ChatMessageBase
     {
         public string playerName;
         public int count;
@@ -444,7 +479,7 @@ namespace RoR2ConversionArtifactMod
             writer.Write(maxCount);
         }
     }
-    public class PlayerItemDropChatMessage : Chat.ChatMessageBase
+    public class PlayerItemDropChatMessage : ChatMessageBase
     {
         public string playerName;
         public ItemIndex itemIndex;
@@ -468,7 +503,7 @@ namespace RoR2ConversionArtifactMod
             writer.Write(itemIndex);
         }
     }
-    public class PlayerEquipmentDropChatMessage : Chat.ChatMessageBase
+    public class PlayerEquipmentDropChatMessage : ChatMessageBase
     {
         public string playerName;
         public EquipmentIndex equipmentIndex;
